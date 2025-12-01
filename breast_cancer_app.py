@@ -1,8 +1,6 @@
 import streamlit as st
 import pandas as pd
 import joblib
-import shap
-import matplotlib.pyplot as plt
 import os
 from datetime import datetime
 import numpy as np
@@ -10,13 +8,12 @@ import numpy as np
 # -------------------------------------------------------------------------------------------------
 # CONFIGURATION
 # -------------------------------------------------------------------------------------------------
-st.set_page_config(page_title="Breast Cancer Prediction System", layout="wide")
+st.set_page_config(page_title="Breast Cancer Prediction System", layout="centered")
 
-# File Paths
+# File Paths (Notice X_train is removed)
 MODEL_PATH = 'svm_breast_cancer_model_top.pkl'
 SCALER_PATH = 'scaler_top_features.pkl'
 FEATURES_PATH = 'top_features.pkl'
-X_TRAIN_PATH = 'X_train_top_features.pkl'
 LOG_FILE = "patient_predictions.csv"
 
 # -------------------------------------------------------------------------------------------------
@@ -24,25 +21,25 @@ LOG_FILE = "patient_predictions.csv"
 # -------------------------------------------------------------------------------------------------
 @st.cache_resource
 def load_artifacts():
-    """Load models and setup SHAP explainer once to save performance."""
-    if not os.path.exists(MODEL_PATH):
-        st.error(f"Critical Error: Model file '{MODEL_PATH}' not found.")
-        return None, None, None, None, None
+    """
+    Load only the essential model artifacts. 
+    Removed X_train and SHAP to reduce file size and errors.
+    """
+    # Check for critical files
+    required_files = [MODEL_PATH, SCALER_PATH, FEATURES_PATH]
+    for f in required_files:
+        if not os.path.exists(f):
+            st.error(f"Critical Error: Missing file '{f}'.")
+            return None, None, None
 
     try:
         svm = joblib.load(MODEL_PATH)
         scaler = joblib.load(SCALER_PATH)
         feats = joblib.load(FEATURES_PATH)
-        x_train = joblib.load(X_TRAIN_PATH)
-        
-        # Initialize SHAP (Using small sample for speed)
-        # We cache this because creating the explainer is expensive
-        explainer = shap.KernelExplainer(svm.predict_proba, x_train.sample(50, random_state=42))
-        
-        return svm, scaler, feats, x_train, explainer
+        return svm, scaler, feats
     except Exception as e:
         st.error(f"Error loading artifacts: {e}")
-        return None, None, None, None, None
+        return None, None, None
 
 def log_prediction(input_df, prediction_label, probability):
     """Log the prediction to a local CSV file."""
@@ -60,46 +57,43 @@ def log_prediction(input_df, prediction_label, probability):
 # MAIN APPLICATION
 # -------------------------------------------------------------------------------------------------
 def main():
-    st.title("🏥 Breast Cancer Prediction System")
-    st.markdown("### Professional Diagnostic Tool Support")
+    st.title("🏥 Breast Cancer Diagnostic Tool")
+    st.markdown("### Clinical Support System")
 
     # 1. Load Resources
-    svm_model, scaler, top_features, X_train_top, explainer = load_artifacts()
+    svm_model, scaler, top_features = load_artifacts()
     
     if svm_model is None:
         st.stop()
 
-    # 2. Sidebar Inputs
-    st.sidebar.header("Patient Measurements")
+    # 2. Input Section
+    st.subheader("Patient Vitals & Measurements")
+    st.info("Please enter the specific mean/worst/se values below.")
     
     input_data = {}
     
-    # Dynamically generate sliders based on the features loaded from the pickle file
-    # We group them for better UI organization if possible, otherwise list them
-    for feature in top_features:
-        # Determine logical min/max based on training data
-        min_val = float(X_train_top[feature].min())
-        max_val = float(X_train_top[feature].max())
-        avg_val = float((min_val + max_val) / 2)
-        
-        input_data[feature] = st.sidebar.slider(
-            label=feature,
-            min_value=min_val,
-            max_value=max_val,
-            value=avg_val,
-            step=0.01
-        )
+    # We use columns to organize the inputs neatly
+    # Since we don't have X_train for min/max, we use number_input
+    # which allows any valid number.
+    col1, col2 = st.columns(2)
+    
+    for i, feature in enumerate(top_features):
+        with (col1 if i % 2 == 0 else col2):
+            # We set a default value of 0.0 to ensure float type
+            input_data[feature] = st.number_input(
+                label=feature,
+                value=0.0,
+                step=0.1,
+                format="%.4f"
+            )
 
     # Convert to DataFrame
     input_df = pd.DataFrame([input_data])
 
-    # 3. Main Interface Tabs
-    tab1, tab2, tab3 = st.tabs(["Prediction & Analysis", "SHAP Explanation", "Patient History"])
-
-    with tab1:
-        st.subheader("Diagnostic Assessment")
-        
-        if st.button("Run Analysis", type="primary"):
+    # 3. Prediction Action
+    st.markdown("---")
+    if st.button("Generate Diagnosis", type="primary"):
+        try:
             # Scaling
             input_scaled = scaler.transform(input_df)
             
@@ -108,51 +102,23 @@ def main():
             prediction_proba = svm_model.predict_proba(input_scaled)[0][1]
             
             result_label = "Malignant" if prediction == 1 else "Benign"
-            result_color = "red" if prediction == 1 else "green"
             
             # Display Result
             if prediction == 1:
-                st.error(f"prediction: {result_label}")
+                st.error(f"### Diagnosis: {result_label}")
+                st.warning(f"Confidence Level: {prediction_proba:.2%}")
             else:
-                st.success(f"Prediction: {result_label}")
-            
-            st.metric(label="Probability of Malignancy", value=f"{prediction_proba:.2%}")
+                st.success(f"### Diagnosis: {result_label}")
+                st.info(f"Confidence Level: {prediction_proba:.2%}")
             
             # Log Data
             log_prediction(input_df, result_label, prediction_proba)
-            st.toast("Result logged to database.")
+            
+        except Exception as e:
+            st.error(f"Prediction Error: {str(e)}")
 
-            # Store in session state for SHAP tab access
-            st.session_state['input_scaled'] = input_scaled
-            st.session_state['run_shap'] = True
-
-    with tab2:
-        st.subheader("Feature Contribution Analysis (SHAP)")
-        
-        if 'run_shap' in st.session_state and st.session_state['run_shap']:
-            with st.spinner("Calculating feature importance..."):
-                input_scaled = st.session_state['input_scaled']
-                shap_values = explainer.shap_values(input_scaled)[1] # Class 1
-                
-                # Sorting logic for plot
-                feature_order = np.argsort(np.abs(shap_values[0]))[::-1]
-                sorted_features = np.array(top_features)[feature_order]
-                sorted_shap_values = shap_values[0][feature_order]
-
-                # Plotting
-                fig, ax = plt.subplots(figsize=(10, 6))
-                colors = ['red' if val > 0 else 'green' for val in sorted_shap_values]
-                ax.barh(sorted_features, sorted_shap_values, color=colors)
-                ax.set_xlabel("SHAP Value (Impact on Model Output)")
-                ax.set_title("Feature Impact: Red pushes towards Malignant, Green towards Benign")
-                plt.tight_layout()
-                
-                st.pyplot(fig)
-        else:
-            st.info("Run an analysis in the 'Prediction' tab to generate SHAP plots.")
-
-    with tab3:
-        st.subheader("Session History")
+    # 4. History Tab
+    with st.expander("View Patient History Log"):
         if os.path.exists(LOG_FILE):
             log_df = pd.read_csv(LOG_FILE)
             st.dataframe(log_df.sort_values(by="Timestamp", ascending=False))
@@ -160,7 +126,7 @@ def main():
             csv = log_df.to_csv(index=False).encode('utf-8')
             st.download_button("Download History CSV", csv, "patient_history.csv", "text/csv")
         else:
-            st.write("No predictions logged yet.")
+            st.write("No local history found.")
 
 if __name__ == "__main__":
     main()
